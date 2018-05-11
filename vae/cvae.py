@@ -1,5 +1,6 @@
 from keras.layers import Input, Dense, Lambda, Dropout, Concatenate
 from keras.models import Model
+from keras.utils import plot_model, to_categorical
 from keras import backend as K
 from keras import metrics
 
@@ -26,16 +27,17 @@ class CVAE():
         self.inputs = Concatenate(axis=1)([self.input, self.conditional])
 
         # Build encoder and decoder
-        self.mu, self.log_sigma = self.create_encoder(self.input, activation,
+        self.mu, self.log_sigma = self.create_encoder(self.inputs, activation,
                                                       self.drop_prob)
         self.output, self.decoder = self.create_decoder(
             activation, self.drop_prob)
 
         # Generate Keras models for the encoder and the entire VAE
-        self.encoder = Model(self.input, self.mu)
-        self.model = Model(self.input, self.output)
+        self.encoder = Model([self.input, self.conditional], self.mu)
+        self.model = Model([self.input, self.conditional], self.output)
         self.optimizer = optimizer
         self.verbose = show_metrics
+        self.model.summary()
 
     # returns two tensors, one for the encoding (z_mean), one for making the manifold smooth
     def create_encoder(self, nn_input, act, drop):
@@ -59,12 +61,14 @@ class CVAE():
         z_cond = Concatenate(axis=1)([z, self.conditional])
 
         rev_layers = self.layer_sizes[::-1]
-        
+
         # Build sampler (for training) and decoder at the same time.
         ae_output = z_cond
 
         # Expand this to latent_dim + label_dim
-        inpt = Input(shape=(self.latent_dim, ), name="decoder_input")
+        inpt = Input(
+            shape=(K.squeeze(z_cond, axis=0).shape[0].value, ),
+            name="decoder_input")
         dec_tensor = inpt
         if len(rev_layers) > 1:
             for lay in rev_layers:
@@ -114,10 +118,4 @@ class CVAE():
 
 
 if __name__ == "__main__":
-    CVAE = CVAE(
-        784,
-        1,
-        [128, 64],
-        activation='relu',
-        optimizer='rmsprop',
-        dropout=0.25)
+    cvae = CVAE(784, 10, [128, 64], activation='relu', optimizer='rmsprop')

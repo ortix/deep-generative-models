@@ -1,20 +1,25 @@
+import os
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.stats import norm
+import keras
 from keras.datasets import mnist
 from keras.optimizers import RMSprop
 from cvae import CVAE
+from scipy.misc import imsave
 
 # set parameters
 batch_size = 100
 latent_dim = 2
-nr_epochs = 30
+nr_epochs = 1
 layers = [256, 128]
 optimizer = RMSprop(lr=1e-3)
 
 # get MNIST digits
 (x_train, y_train), (x_test, y_test) = mnist.load_data()
 
+y_train = keras.utils.to_categorical(y_train)
+y_test = keras.utils.to_categorical(y_test)
 x_train = x_train.astype('float32') / 255.
 x_test = x_test.astype('float32') / 255.
 x_train = x_train.reshape((len(x_train), np.prod(x_train.shape[1:])))
@@ -22,56 +27,56 @@ x_test = x_test.reshape((len(x_test), np.prod(x_test.shape[1:])))
 
 # Train model
 original_dim = x_train.shape[1]
+label_dim = 1
 
 vae_obj = CVAE(
     original_dim,
-    1,
+    label_dim,
     layers,
     activation='relu',
     optimizer=optimizer,
-    dropout=0.25)
+    dropout=0.0)
 
 vae = vae_obj.compile()
 vae.summary()
 vae.fit(
-    x_train,
+    [x_train, y_train],
     x_train,
     shuffle=True,
     epochs=nr_epochs,
     batch_size=batch_size,
-    validation_data=(x_test, x_test),
-    verbose=2)
+    validation_data=([x_test, y_test], x_test),
+    verbose=1)
 
-# get the model that projects inputs on the latent space
-encoder = vae_obj.encoder
+# this loop prints the one-hot decodings
 
-# display a 2D plot of the digit classes in the latent space
-x_test_encoded = encoder.predict(x_test, batch_size=batch_size)
-plt.figure(figsize=(6, 6))
-plt.scatter(x_test_encoded[:, 0], x_test_encoded[:, 1], c=y_test)
-plt.colorbar()
-plt.show()
+#for i in range(n_z+n_y):
+#	tmp = np.zeros((1,n_z+n_y))
+#	tmp[0,i] = 1
+#	generated = decoder.predict(tmp)
+#	file_name = './img' + str(i) + '.jpg'
+#	print(generated)
+#	imsave(file_name, generated.reshape((28,28)))
+#	sleep(0.5)
 
-# get a digit generator that can sample from the learned distribution
-generator = vae_obj.decoder
+# this loop prints a transition through the number line
 
-# display a 2D manifold of the digits
-n = 15  # figure with 15x15 digits
-digit_size = 28
-figure = np.zeros((digit_size * n, digit_size * n))
-# linearly spaced coordinates on the unit square were transformed through the inverse CDF (ppf) of the Gaussian
-# to produce values of the latent variables z, since the prior of the latent space is Gaussian
-grid_x = norm.ppf(np.linspace(0.05, 0.95, n))
-grid_y = norm.ppf(np.linspace(0.05, 0.95, n))
+pic_num = 0
+variations = 30 # rate of change; higher is slower
 
-for i, yi in enumerate(grid_x):
-    for j, xi in enumerate(grid_y):
-        z_sample = np.array([[xi, yi]])
-        x_decoded = generator.predict(z_sample)
-        digit = x_decoded[0].reshape(digit_size, digit_size)
-        figure[i * digit_size:(i + 1) * digit_size, j * digit_size:(
-            j + 1) * digit_size] = digit
+current_dir = os.path.dirname(os.path.realpath(__file__))
+img_dir = os.path.join(current_dir,'images')
+if not os.path.exists(img_dir):
+    os.makedirs(img_dir)
 
-plt.figure(figsize=(10, 10))
-plt.imshow(figure, cmap='Greys_r')
-plt.show()
+print("Generating images...")
+for j in range(latent_dim, latent_dim + label_dim - 1):
+	for k in range(variations):
+		v = np.zeros((1, latent_dim+label_dim))
+		v[0, j] = 1 - (k/variations)
+		v[0, j+1] = (k/variations)
+		generated = vae_obj.decoder.predict(v)
+		pic_idx = j - latent_dim + (k/variations)
+		file_name = img_dir + '/img{0:.3f}.jpg'.format(pic_idx)
+		imsave(file_name, generated.reshape((28,28)))
+		pic_num += 1
