@@ -7,7 +7,7 @@ from keras.layers.advanced_activations import LeakyReLU
 from keras.layers.convolutional import UpSampling2D, Conv2D
 from keras.models import Sequential, Model
 from keras.optimizers import RMSprop
-
+from scipy.stats import norm
 import matplotlib.pyplot as plt
 
 import sys
@@ -107,8 +107,9 @@ class GAN():
 
         # Load the dataset
         n = 10000
+        self.epochs = epochs
         angles, x_pos, y_pos = self.getSamples(n)
-        X_train = (np.array([x_pos, y_pos]).T +1) /2
+        X_train = (np.array([x_pos, y_pos]).T + 1) / 2
         X_train = np.expand_dims(X_train, axis=3)
         half_batch = int(batch_size / 2)
 
@@ -151,8 +152,8 @@ class GAN():
             if (epoch % 10 == 0):
                 print("%d [D loss: %f, acc.: %.2f%%] [G loss: %f]" %
                       (epoch, d_loss[0], 100 * d_loss[1], g_loss))
-            if epoch % save_interval == 0:
-                self.save_imgs(epoch)
+            if epoch == self.epochs-1:
+                self.project_manifold(epoch)
 
     def save_imgs(self, epoch):
         noise = np.random.normal(0, 1, (10000, 100))
@@ -162,7 +163,8 @@ class GAN():
         plt.savefig("./images/gan_%d.png" % epoch)
         plt.close()
 
+
 if __name__ == '__main__':
     gan = GAN()
-    gan.train(epochs=5000, batch_size=50, save_interval=200)
-    gan.generator.save('gan_trained.h5')
+    gan.train(epochs=100, batch_size=50, save_interval=200)
+    # gan.generator.save('gan_trained.h5')

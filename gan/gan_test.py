@@ -13,7 +13,7 @@ def getSamples(n):
     return angles, x, y
 
 
-angles, x,y = getSamples(200)
+angles, x, y = getSamples(200)
 
 generator = load_model('gan_trained.h5')
 generator.summary()

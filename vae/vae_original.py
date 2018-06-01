@@ -10,19 +10,21 @@ from __future__ import print_function
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.stats import norm
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+from matplotlib.ticker import MultipleLocator
 
 from keras.layers import Input, Dense, Lambda
-from keras.models import Model
+from keras.models import Model, load_model
 from keras import backend as K
 from keras import metrics
 import keras
 from keras.datasets import mnist
 
-batch_size = 200
+batch_size = 100
 original_dim = 784
 latent_dim = 2
 intermediate_dim = 128
-epochs = 5
+epochs = 50
 epsilon_std = 1.0
 
 x = Input(shape=(original_dim, ))
@@ -53,8 +55,12 @@ vae = Model(x, x_decoded_mean)
 
 # Compute VAE loss
 def vae_loss(x, x_decoded_mean):
-    recon_loss = -K.sum(x * K.log(1e-10 + x_decoded_mean) + (1-x) * K.log(1e-10 + 1 - x_decoded_mean), axis=1)
-    kl_loss = -0.5 * K.sum(1 + z_log_var - K.square(z_mean) - K.exp(z_log_var), axis=-1)
+    recon_loss = -K.sum(
+        x * K.log(1e-10 + x_decoded_mean) +
+        (1 - x) * K.log(1e-10 + 1 - x_decoded_mean),
+        axis=1)
+    kl_loss = -0.5 * K.sum(
+        1 + z_log_var - K.square(z_mean) - K.exp(z_log_var), axis=-1)
     return K.mean(recon_loss + kl_loss)
 
 
@@ -70,29 +76,41 @@ x_test = x_test.astype('float32') / 255.
 x_train = x_train.reshape((len(x_train), np.prod(x_train.shape[1:])))
 x_test = x_test.reshape((len(x_test), np.prod(x_test.shape[1:])))
 
-vae.fit(
-    x_train,
-    x_train,
-    shuffle=True,
-    epochs=epochs,
-    batch_size=batch_size,
-    validation_data=(x_test, x_test))
+try:
+    encoder = load_model('encoder.h5')
+    generator = load_model('generator.h5')
+    print("Loaded models")
+except OSError:
+    print("Training models")
+    vae.fit(
+        x_train,
+        x_train,
+        shuffle=True,
+        epochs=epochs,
+        batch_size=batch_size,
+        validation_data=(x_test, x_test))
 
-# build a model to project inputs on the latent space
-encoder = Model(x, z_mean)
+    # build a model to project inputs on the latent space
+    encoder = Model(x, z_mean)
+    # build a digit generator that can sample from the learned distribution
+    decoder_input = Input(shape=(latent_dim, ))
+    _h_decoded = decoder_h(decoder_input)
+    _x_decoded_mean = decoder_mean(_h_decoded)
+    generator = Model(decoder_input, _x_decoded_mean)
+    encoder.save('encoder.h5')
+    generator.save('generator.h5')
+
 
 # display a 2D plot of the digit classes in the latent space
 x_test_encoded = encoder.predict(x_test, batch_size=batch_size)
-plt.figure(figsize=(6, 6))
-plt.scatter(x_test_encoded[:, 0], x_test_encoded[:, 1], c=y_test)
-plt.colorbar()
-plt.show()
 
-# build a digit generator that can sample from the learned distribution
-decoder_input = Input(shape=(latent_dim, ))
-_h_decoded = decoder_h(decoder_input)
-_x_decoded_mean = decoder_mean(_h_decoded)
-generator = Model(decoder_input, _x_decoded_mean)
+fig, (ax1, ax2) = plt.subplots(1, 2,figsize=(10,5))
+im1 = ax1.scatter(x_test_encoded[:, 0], x_test_encoded[:, 1], c=y_test )
+divider1 = make_axes_locatable(ax1)
+cax1 = divider1.append_axes("right", size="20%", pad=0.05)
+cbar1 = plt.colorbar(im1, cax=cax1)
+ax1.set_title('Latent space mapping (a)')
+
 
 # display a 2D manifold of the digits
 n = 15  # figure with 15x15 digits
@@ -111,6 +129,9 @@ for i, yi in enumerate(grid_x):
         figure[i * digit_size:(i + 1) * digit_size, j * digit_size:(
             j + 1) * digit_size] = digit
 
-plt.figure(figsize=(10, 10))
-plt.imshow(figure, cmap='Greys_r')
+ax2.imshow(figure, cmap='Greys_r')
+ax2.xaxis.set_visible(False)
+ax2.yaxis.set_visible(False)
+ax2.set_title('Latent space projection (b)')
+fig.tight_layout()
 plt.show()

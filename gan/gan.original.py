@@ -14,9 +14,10 @@ import sys
 
 import numpy as np
 
+
 class GAN():
     def __init__(self):
-        self.img_rows = 28 
+        self.img_rows = 28
         self.img_cols = 28
         self.channels = 1
         self.img_shape = (self.img_rows, self.img_cols, self.channels)
@@ -25,9 +26,9 @@ class GAN():
 
         # Build and compile the discriminator
         self.discriminator = self.build_discriminator()
-        self.discriminator.compile(loss='binary_crossentropy', 
-            optimizer=optimizer,
-            metrics=['accuracy'])
+        self.discriminator.compile(loss='binary_crossentropy',
+                                   optimizer=optimizer,
+                                   metrics=['accuracy'])
 
         # Build and compile the generator
         self.generator = self.build_generator()
@@ -44,14 +45,14 @@ class GAN():
         valid = self.discriminator(img)
 
         # The combined model  (stacked generator and discriminator) takes
-        # noise as input => generates images => determines validity 
+        # noise as input => generates images => determines validity
         self.combined = Model(z, valid)
         self.combined.compile(loss='binary_crossentropy', optimizer=optimizer)
 
     def build_generator(self):
 
         noise_shape = (100,)
-        
+
         model = Sequential()
 
         model.add(Dense(256, input_shape=noise_shape))
@@ -76,7 +77,7 @@ class GAN():
     def build_discriminator(self):
 
         img_shape = (self.img_rows, self.img_cols, self.channels)
-        
+
         model = Sequential()
 
         model.add(Flatten(input_shape=img_shape))
@@ -128,7 +129,6 @@ class GAN():
             d_loss_fake = self.discriminator.train_on_batch(gen_imgs, np.zeros((half_batch, 1)))
             d_loss = 0.5 * np.add(d_loss_real, d_loss_fake)
 
-
             # ---------------------
             #  Train Generator
             # ---------------------
@@ -143,7 +143,7 @@ class GAN():
             g_loss = self.combined.train_on_batch(noise, valid_y)
 
             # Plot the progress
-            print ("%d [D loss: %f, acc.: %.2f%%] [G loss: %f]" % (epoch, d_loss[0], 100*d_loss[1], g_loss))
+            print("%d [D loss: %f, acc.: %.2f%%] [G loss: %f]" % (epoch, d_loss[0], 100 * d_loss[1], g_loss))
 
             # If at save interval => save generated image samples
             if epoch % save_interval == 0:
@@ -161,8 +161,8 @@ class GAN():
         cnt = 0
         for i in range(r):
             for j in range(c):
-                axs[i,j].imshow(gen_imgs[cnt, :,:,0], cmap='gray')
-                axs[i,j].axis('off')
+                axs[i, j].imshow(gen_imgs[cnt, :, :, 0], cmap='gray')
+                axs[i, j].axis('off')
                 cnt += 1
         fig.savefig("./mnist_%d.png" % epoch)
         plt.close()
