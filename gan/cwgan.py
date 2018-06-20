@@ -1,143 +1,155 @@
-from keras import backend as K
-from keras.models import Sequential, Model
-from keras.layers import Dense, Activation, LeakyReLU, PReLU, Input, Lambda
-from keras.optimizers import Adam
+from __future__ import division, print_function
+
+from datetime import datetime
+
+import keras.backend as K
+import matplotlib.pyplot as plt
 import numpy as np
-from functools import partial
+import tensorflow as tf
+from keras import initializers
+from keras.callbacks import TensorBoard
+from keras.datasets import mnist
+from keras.layers import (Activation, BatchNormalization, Dense, Dropout,
+                          Flatten, Input, Lambda, Reshape, multiply)
+from keras.layers.advanced_activations import LeakyReLU, PReLU
+from keras.layers.merge import concatenate
+from keras.models import Model, Sequential, load_model
+from keras.optimizers import Adam, RMSprop
+from keras.utils import plot_model
 
 
 class CWGAN():
-
     def __init__(self,
                  input_size,
                  label_size,
                  latent_size,
                  d_layers,
-                 activation='relu'):
+                 optimizer='adam',
+                 activation='relu',
+                 show_metrics=False,
+                 batch_norm=False):
+
+        # Variables
         self.input_size = input_size
         self.label_size = label_size
         self.latent_size = latent_size
         self.layers = d_layers
+        self.batch_norm = batch_norm
         self.activation = activation
 
-        self.generator = self.create_generator()
-        self.generator.summary()
-        self.discriminator = self.create_discriminator()
-        self.discriminator.summary()
+        optimizer = self.get_optimizer(optimizer)
 
-        self.g_model = self.compile_generator()
-        self.d_model = self.compile_discriminator()
+        # The generator takes noise and the target label (states) as input
+        # and generates the corresponding samples of that label
+        noise = Input(shape=(self.latent_size, ), name="noise")
+        label = Input(shape=(self.label_size, ), name="labels")
+        real_samples = Input(shape=(self.input_size,), name="real")
+
+        self.discriminator = self.build_discriminator()
+        self.generator = self.build_generator([noise, label])
+
+        # First we train the discriminator
+        self.generator.trainable = False
+        fake_samples = self.generator([noise, label])
+
+        fake = self.discriminator([fake_samples, label])
+        valid = self.discriminator([real_samples, label])
+
+        interpolated = Lambda(self.random_weighted_average)([real_samples, fake_samples])
+        valid_interp = self.discriminator([interpolated, label])
+
+        # The combined model  (stacked generator and discriminator)
+        # Trains generator to fool discriminator
+        self.d_model = Model([real_samples, noise, label], [valid, fake, valid_interp])
+        self.d_model.compile(
+            loss=[self.wasserstein_loss, self.wasserstein_loss, self.gp_loss(interpolated)],
+            optimizer=optimizer)
+
+        # Time to train the generator
+        self.discriminator.trainable = False
+        self.generator.trainable = True
+
+        noise_gen = Input(shape=(self.latent_size,), name="noise_gen")
+
+        fake_samples = self.generator([noise_gen, label])
+        valid = self.discriminator([fake_samples, label])
+
+        self.g_model = Model([noise_gen, label], valid)
+        self.g_model.compile(loss=self.wasserstein_loss, optimizer=optimizer)
+
+        # self.init_tensorboard()
+
+        # summary = tf.Summary()
+        # self.callback.writer.add_summary(summary, 1)
+        # self.callback.writer.flush()
 
         return None
 
-    def compile_generator(self):
-        '''
-        First configures the generator and discriminator and then compiles the generator.
-        We need to disable the discriminator since we train it separately from the generator.
-        We re-enable the discriminator once the generator has been compiled
-        '''
-        self.discriminator_trainable(False)
-        generator_input = Input(shape=(self.latent_size, ))
-        generator_layers = self.generator(generator_input)
-        discriminator_layers_for_generator = self.discriminator(
-            generator_layers)
-        generator_model = Model(
-            inputs=[generator_input],
-            outputs=[discriminator_layers_for_generator])
-        # We use the Adam paramaters from Gulrajani et al.
-        generator_model.compile(
-            optimizer=Adam(0.0001, beta_1=0.5, beta_2=0.9),
-            loss=self.wasserstein_loss)
-        self.discriminator_trainable(True)
-        return generator_model
+    def build_generator(self, noise_label):
+        noise = noise_label[0]
+        label = noise_label[1]
 
-    def compile_discriminator(self):
-        self.generator_trainable(False)
+        # noise_dense = Dense(self.latent_size)(noise)
+        # noise_dense = self.get_activation()(noise_dense)
+        # label_dense = Dense(self.label_size)(label)
+        # label_dense = self.get_activation()(label_dense)
+        x = concatenate([noise, label])
 
-        real_samples = Input(shape=(self.input_size, ))
-        generator_input_for_discriminator = Input(shape=(self.latent_size, ))
-        generated_samples_for_discriminator = self.generator(
-            generator_input_for_discriminator)
-        discriminator_output_from_generator = self.discriminator(
-            generated_samples_for_discriminator)
-        discriminator_output_from_real_samples = self.discriminator(
-            real_samples)
+        # x = Dense(self.label_size+self.latent_size)(concat)
 
-        # Generate weighted-averages of real and generated samples, to use for the gradient norm penalty.
-        averaged_samples = Lambda(self.random_weighted_average)(
-            [generated_samples_for_discriminator, real_samples])
-        averaged_samples_out = self.discriminator(averaged_samples)
+        for l in self.layers[::-1]:
+            x = Dense(l)(x)
+            x = BatchNormalization(momentum=0.8)(x)
+            x = self.get_activation('relu')(x)
 
-        discriminator_model = Model(
-            inputs=[real_samples, generator_input_for_discriminator],
-            outputs=[
-                discriminator_output_from_real_samples,
-                discriminator_output_from_generator, averaged_samples_out
-            ])
+        out = Dense(self.input_size, activation='tanh')(x)
+        generator = Model([noise, label], out)
 
-        discriminator_model.compile(
-            optimizer=Adam(0.0001, beta_1=0.5, beta_2=0.9),
-            loss=[
-                self.wasserstein_loss, self.wasserstein_loss,
-                self.gp_loss(averaged_samples)
-            ])
-        self.generator_trainable(True)
-        return None
+        return generator
+
+    def build_discriminator(self):
+        model = Sequential()
+        nodes = int(np.median(self.layers))
+        activation = self.get_activation('leaky')
+        model.add(Dense(nodes, input_dim=(self.input_size + self.label_size)))
+        model.add(activation)
+        if len(self.layers) > 1:
+            for l in self.layers[1:]:
+                model.add(Dense(nodes))
+                model.add(activation)
+
+        model.add(Dense(1, activation='linear'))
+        model.summary()
+
+        data = Input(shape=(self.input_size, ), name="input_data")
+        label = Input(shape=(self.label_size, ), name="input_labels")
+        model_input = concatenate([data, label])
+        validity = model(model_input)
+        discriminator = Model([data, label], validity)
+        return discriminator
+
+    def get_activation(self, activation='relu'):
+        if activation == 'leaky':
+            return LeakyReLU(alpha=0.2)
+        if activation == 'prelu':
+            return PReLU()
+        # default to relu
+        return Activation('relu')
+
+    def get_optimizer(self, optimizer):
+        if optimizer == 'rmsprop':
+            return RMSprop(0.0003)
+
+        return Adam(0.0001, 0.0, 0.9)
+
+    def load_model(self, model):
+        return load_model(model)
 
     def random_weighted_average(self, inputs):
         generated, real = inputs
         alpha = K.random_uniform(shape=K.shape(real))
         diff = generated - real
         return real + alpha * diff
-
-    def discriminator_trainable(self, trainable):
-        for layer in self.discriminator.layers:
-            layer.trainable = trainable
-        self.discriminator.trainable = trainable
-        return None
-
-    def generator_trainable(self, trainable):
-        for layer in self.generator.layers:
-            layer.trainable = trainable
-        self.generator.trainable = trainable
-        return None
-
-    def create_generator(self):
-        model = Sequential()
-        model.add(Dense(self.layers[0], input_dim=self.latent_size))
-        model.add(self.get_activation())
-        if len(self.layers) > 1:
-            # Reverse layers for generator (small to large)
-            for l in self.layers[::-1]:
-                model.add(Dense(l))
-                model.add(self.get_activation())
-
-        # Even though this is the output of the generator, the data itself is called the input to the model
-        model.add(Dense(self.input_size))
-        return model
-
-    def create_discriminator(self):
-        model = Sequential()
-        model.add(Dense(self.layers[0], input_dim=self.input_size))
-        model.add(self.get_activation())
-        if len(self.layers) > 1:
-            for l in self.layers:  # self.layers -1
-                model.add(Dense(l, kernel_initializer='he_normal'))
-                model.add(self.get_activation())
-
-        model.add(Dense(1, kernel_initializer='he_normal'))
-        return model
-
-    def get_activation(self):
-        if self.activation == 'leaky':
-            return LeakyReLU()
-        if self.activation == 'prelu':
-            return PReLU()
-        # default to relu
-        return Activation('relu')
-
-    def wasserstein_loss(self, y_true, y_pred):
-        return K.mean(y_true * y_pred)
 
     def gp_loss(self, averaged_samples, lambda_weight=10):
         def loss_func(y_true, y_pred):
@@ -151,6 +163,18 @@ class CWGAN():
 
         return loss_func
 
+    def wasserstein_loss(self, y_true, y_pred):
+        return K.mean(y_true * y_pred)
 
-if __name__ == "__main__":
-    nn = CWGAN(4, 4, 2, [64, 32])
+    def init_tensorboard(self):
+        # We store the runs in subdirectories named by the time
+        dirname = datetime.now().strftime("%Y_%m_%d__%H_%M_%S")
+        self.callback = TensorBoard(log_dir="./logs/{}/".format(dirname))
+        self.callback.set_model(self.d_model)
+        return None
+
+
+if __name__ == '__main__':
+    cgan = CWGAN(4, 4, 2, [128, 64])
+    # plot_model(cgan.generator, show_shapes=True)
+    # cgan.train(epochs=2000, batch_size=32, sample_interval=200)

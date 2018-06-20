@@ -1,87 +1,96 @@
-from keras.layers import Input, Dense, Lambda, Dropout, Concatenate
-from keras.models import Model
+from keras.layers import Input, Dense, Lambda, Concatenate, BatchNormalization, PReLU
+from keras.layers.merge import concatenate
+from keras.models import Model, Sequential, load_model
 from keras.utils import plot_model, to_categorical
 from keras import backend as K
-from keras import metrics
+from keras import metrics, losses
+from keras.callbacks import TensorBoard
+from datetime import datetime
 
 
 class CVAE():
     def __init__(self,
                  input_size,
                  label_size,
+                 latent_size,
                  d_layers,
-                 activation='relu',
                  optimizer='rmsprop',
                  show_metrics=False,
-                 dropout=0.0):
+                 batch_norm=True):
         # variables
         self.input_size = input_size
         self.label_size = label_size
+        self.latent_size = latent_size
         self.layer_sizes = d_layers
-        self.latent_dim = 2
-        self.drop_prob = float(dropout)
+        self.batch_norm = batch_norm
 
         # Build inputs tensor containing the input data and conditional array
-        self.input = Input(shape=(input_size, ), name="encoder_input")
-        self.conditional = Input(shape=(label_size, ), name="encoder_label")
-        self.inputs = Concatenate(axis=1)([self.input, self.conditional])
+        self.input = Input(shape=(input_size, ), name="input_data")
+        self.conditional = Input(shape=(label_size, ), name="input_labels")
+        self.inputs = concatenate([self.input, self.conditional])
 
         # Build encoder and decoder
-        self.mu, self.log_sigma = self.create_encoder(self.inputs, activation,
-                                                      self.drop_prob)
-        self.output, self.decoder = self.create_decoder(
-            activation, self.drop_prob)
+        self.mu, self.log_sigma = self.create_encoder(self.inputs)
+        self.decoder = self.create_decoder()
+        self.sampler = self.decoder([Lambda(self.sample_z)([self.mu, self.log_sigma]), self.conditional])
 
         # Generate Keras models for the encoder and the entire VAE
         self.encoder = Model([self.input, self.conditional], self.mu)
-        self.model = Model([self.input, self.conditional], self.output)
+        self.model = Model([self.input, self.conditional], self.sampler)
         self.optimizer = optimizer
         self.verbose = show_metrics
-        self.model.summary()
+        self.callbacks = []
+
+        # Run some post operations
+        self.init_callbacks()
 
     # returns two tensors, one for the encoding (z_mean), one for making the manifold smooth
-    def create_encoder(self, nn_input, act, drop):
+    def create_encoder(self, nn_input):
         x = nn_input
         for l in self.layer_sizes:
-            x = Dense(l, activation=act)(x)
-            if drop:
-                x = Dropout(drop)(x)
-        z_mean = Dense(self.latent_dim)(x)
-        z_log_var = Dense(self.latent_dim)(x)
-        return z_mean, z_log_var
+            x = Dense(l, activation="relu", name="h_enc_{}".format(l))(x)
+            if self.batch_norm:
+                x = BatchNormalization()(x)
+        z_mu = Dense(self.latent_size, activation="linear", name="z_mean")(x)
+        z_log_sigma = Dense(self.latent_size, activation="linear", name="z_log_sigma")(x)
+        return z_mu, z_log_sigma
 
-    # returns the output tensor of the auto-encoder and de decoder model.
-    def create_decoder(self, act, drop):
-        # note that "output_shape" isn't necessary with the TensorFlow backend
-        z = Lambda(
-            self.sample_z,
-            output_shape=(self.latent_dim, ))([self.mu, self.log_sigma])
+    def create_decoder(self):
+        noise = Input(shape=(self.latent_size,))
+        label = Input(shape=(self.label_size,))
+        x = concatenate([noise, label])
+        for l in self.layer_sizes[::-1]:
+            x = Dense(l, activation='relu')(x)
+            if self.batch_norm:
+                x = BatchNormalization()(x)
 
-        # Concatenate the conditional to the sampled Gaussian -- p(x|z,c)
-        z_cond = Concatenate(axis=1)([z, self.conditional])
+        out = Dense(self.input_size, activation='linear')(x)
 
-        rev_layers = self.layer_sizes[::-1]
+        return Model([noise, label], out)
 
+    def create_decoder_(self):
+        z = Lambda(self.sample_z)([self.mu, self.log_sigma])
+        z_cond = concatenate([z, self.conditional])
+        layers = self.layer_sizes[::-1]
         # Build sampler (for training) and decoder at the same time.
         ae_output = z_cond
-
-        # Expand this to latent_dim + label_dim
-        inpt = Input(
-            shape=(K.squeeze(z_cond, axis=0).shape[0].value, ),
-            name="decoder_input")
+        inpt = Input(shape=(self.latent_size+self.label_size, ), name="decoder_input")
         dec_tensor = inpt
-        if len(rev_layers) > 1:
-            for lay in rev_layers:
-                dec = Dense(lay, activation=act)
-                ae_output = dec(ae_output)
-                dec_tensor = dec(dec_tensor)
-                if drop:
-                    ae_output = Dropout(drop)(ae_output)
-                    dec_tensor = Dropout(drop)(dec_tensor)
-        output_layer = Dense(self.input_size, activation=act, name="output")
+        for l in layers:
+            dec = Dense(l, activation='relu', name="h_dec_{}".format(l))
+            ae_output = dec(ae_output)
+            dec_tensor = dec(dec_tensor)
+            if self.batch_norm:
+                ae_output = BatchNormalization()(ae_output)
+                dec_tensor = BatchNormalization()(dec_tensor)
+
+        # We use linear activation to accommodate real valued output data
+        output_layer = Dense(self.input_size, activation="linear", name="output")
         ae_output = output_layer(ae_output)
         dec_tensor = output_layer(dec_tensor)
-        # dec_tensor is turned into a model. ae_output will be turned into a Model in the __init__
+
+        # dec_tensor is used to create a separate decoder model used for generation
+        # ae_output will be used in the __init__ to create the full CVAE model
         decoder = Model(inpt, dec_tensor)
         return ae_output, decoder
 
@@ -89,7 +98,9 @@ class CVAE():
     def sample_z(self, args):
         z_mean, z_log_var = args
         epsilon = K.random_normal(
-            shape=(K.shape(z_mean)[0], self.latent_dim), mean=0., stddev=1.0)
+            shape=(K.shape(z_mean)[0], K.int_shape(z_mean)[1]),
+            mean=0.,
+            stddev=1.0)
         return z_mean + K.exp(z_log_var / 2) * epsilon
 
     # loss functions
@@ -99,14 +110,12 @@ class CVAE():
         return K.mean(xent_loss + kl_loss)
 
     def reconstruction_loss(self, x, x_decoded_mean):
-        return self.input_size * metrics.binary_crossentropy(x, x_decoded_mean)
+        return losses.mean_squared_error(x, x_decoded_mean)
 
-    def kl_loss(
-            self, x,
-            x_decoded_mean):  # inputs are here so you can use it as a metric
-        return -0.5 * K.sum(
-            1 + self.log_sigma - K.square(self.mu) - K.exp(self.log_sigma),
-            axis=-1)
+    def kl_loss(self, x, x_decoded_mean):
+        return (0.5 * K.sum(
+            K.exp(self.log_sigma) + K.square(self.mu) - 1. - self.log_sigma,
+            axis=-1))
 
     # builds and returns the model. This is how you get the model in your training code.
     def compile(self):
@@ -116,6 +125,16 @@ class CVAE():
         self.model.compile(self.optimizer, loss=self.vae_loss, metrics=met)
         return self.model
 
+    def load_model(self, path):
+        return load_model(path)
+
+    def init_callbacks(self):
+        # We store the runs in subdirectories named by the time
+        dirname = datetime.now().strftime("%Y_%m_%d__%H_%M_%S")
+        self.callbacks.append(
+            TensorBoard(log_dir="./logs/{}/".format(dirname)))
+        return None
+
 
 if __name__ == "__main__":
-    cvae = CVAE(784, 10, [128, 64], activation='relu', optimizer='rmsprop')
+    cvae = CVAE(784, 10, 2, [128, 64], optimizer='rmsprop')
